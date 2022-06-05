@@ -17,7 +17,7 @@
 import json
 import logging
 from typing import Any, Dict, List, Optional, Union
-from urllib import request
+from urllib import request, error
 from urllib.error import URLError
 
 from celery.utils.log import get_task_logger
@@ -82,6 +82,15 @@ def get_url(chart: Slice, extra_filters: Optional[Dict[str, Any]] = None) -> str
         )
         return f"{baseurl}{chart.get_explore_url(overrides=extra_filters)}"
 
+def get_login_url() -> str:
+    """Return external URL for authentication."""
+    with app.test_request_context():
+        baseurl = (
+            "{SUPERSET_WEBSERVER_PROTOCOL}://"
+            "{SUPERSET_WEBSERVER_ADDRESS}:"
+            "{SUPERSET_WEBSERVER_PORT}".format(**app.config)
+        )
+        return f"{baseurl}/login/"
 
 class Strategy:  # pylint: disable=too-few-public-methods
     """
@@ -283,10 +292,28 @@ def cache_warmup(
         return message
 
     results: Dict[str, List[str]] = {"success": [], "errors": []}
+    class NoRedirect(request.HTTPRedirectHandler):
+      def redirect_request(self, req, fp, code, msg, headers, newurl):
+          return None
+
+    noAuthRedirectOpener = request.build_opener(NoRedirect)
+    request.install_opener(noAuthRedirectOpener)
+    try:
+      authResponse = request.urlopen(get_login_url(), 'username=admin&password=admin'.encode())
+    except error.HTTPError as e:
+      if (e.status == 302):
+        authResponse = e
+      else:
+        raise e
+
+    authCookie = authResponse.headers.get('Set-Cookie')
+
     for url in strategy.get_urls():
         try:
             logger.info("Fetching %s", url)
-            request.urlopen(url)  # pylint: disable=consider-using-with
+            cacheRefreshRequest = request.Request(url)
+            cacheRefreshRequest.add_header('Cookie', authCookie);
+            request.urlopen(cacheRefreshRequest) # pylint: disable=consider-using-with
             results["success"].append(url)
         except URLError:
             logger.exception("Error warming up cache!")
